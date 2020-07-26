@@ -182,7 +182,7 @@ func handleDiscoveryRequests() {
 }
 
 // discoverInstance will attempt to discover (poll) an instance (unless
-// it is already up to date) and will also ensure that its master and
+// it is already up to date) and will also ensure that its main and
 // replicas (if any) are also checked.
 func discoverInstance(instanceKey inst.InstanceKey) {
 	if inst.InstanceIsForgotten(&instanceKey) {
@@ -274,7 +274,7 @@ func discoverInstance(instanceKey inst.InstanceKey) {
 	}
 
 	// Investigate replicas:
-	for _, replicaKey := range instance.SlaveHosts.GetInstanceKeys() {
+	for _, replicaKey := range instance.SubordinateHosts.GetInstanceKeys() {
 		replicaKey := replicaKey // not needed? no concurrency here?
 
 		// Avoid noticing some hosts we would otherwise discover
@@ -286,9 +286,9 @@ func discoverInstance(instanceKey inst.InstanceKey) {
 			discoveryQueue.Push(replicaKey)
 		}
 	}
-	// Investigate master:
-	if instance.MasterKey.IsValid() {
-		discoveryQueue.Push(instance.MasterKey)
+	// Investigate main:
+	if instance.MainKey.IsValid() {
+		discoveryQueue.Push(instance.MainKey)
 	}
 }
 
@@ -363,11 +363,11 @@ func onHealthTick() {
 	}
 }
 
-// publishDiscoverMasters will publish to raft a discovery request for all known masters.
+// publishDiscoverMains will publish to raft a discovery request for all known mains.
 // This makes for a best-effort keep-in-sync between raft nodes, where some may have
 // inconsistent data due to hosts being forgotten, for example.
-func publishDiscoverMasters() error {
-	instances, err := inst.ReadWriteableClustersMasters()
+func publishDiscoverMains() error {
+	instances, err := inst.ReadWriteableClustersMains()
 	if err == nil {
 		for _, instance := range instances {
 			key := instance.Key
@@ -380,7 +380,7 @@ func publishDiscoverMasters() error {
 // InjectPseudoGTIDOnWriters will inject a PseudoGTID entry on all writable, accessible,
 // supported writers.
 func InjectPseudoGTIDOnWriters() error {
-	instances, err := inst.ReadWriteableClustersMasters()
+	instances, err := inst.ReadWriteableClustersMains()
 	if err != nil {
 		return log.Errore(err)
 	}
@@ -473,19 +473,19 @@ func ContinuousDiscovery() {
 				if IsLeaderOrActive() {
 					go inst.RecordInstanceCoordinatesHistory()
 					go inst.ReviewUnseenInstances()
-					go inst.InjectUnseenMasters()
+					go inst.InjectUnseenMains()
 
 					go inst.ForgetLongUnseenInstances()
 					go inst.ForgetUnseenInstancesDifferentlyResolved()
 					go inst.ForgetExpiredHostnameResolves()
 					go inst.DeleteInvalidHostnameResolves()
-					go inst.ResolveUnknownMasterHostnameResolves()
+					go inst.ResolveUnknownMainHostnameResolves()
 					go inst.ExpireMaintenance()
 					go inst.ExpireCandidateInstances()
 					go inst.ExpireHostnameUnresolve()
 					go inst.ExpireClusterDomainName()
 					go inst.ExpireAudit()
-					go inst.ExpireMasterPositionEquivalence()
+					go inst.ExpireMainPositionEquivalence()
 					go inst.ExpirePoolInstances()
 					go inst.FlushNontrivialResolveCacheToDatabase()
 					go inst.ExpireInstanceBinlogFileHistory()
@@ -503,7 +503,7 @@ func ContinuousDiscovery() {
 			}()
 		case <-raftCaretakingTick:
 			if orcraft.IsRaftEnabled() && orcraft.IsLeader() {
-				go publishDiscoverMasters()
+				go publishDiscoverMains()
 			}
 		case <-recoveryTick:
 			go func() {

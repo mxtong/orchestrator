@@ -126,10 +126,10 @@ func RefreshTopologyInstances(instances [](*Instance)) {
 	}
 }
 
-// RefreshInstanceSlaveHosts is a workaround for a bug in MySQL where
+// RefreshInstanceSubordinateHosts is a workaround for a bug in MySQL where
 // SHOW SLAVE HOSTS continues to present old, long disconnected replicas.
 // It turns out issuing a couple FLUSH commands mitigates the problem.
-func RefreshInstanceSlaveHosts(instanceKey *InstanceKey) (*Instance, error) {
+func RefreshInstanceSubordinateHosts(instanceKey *InstanceKey) (*Instance, error) {
 	_, _ = ExecInstance(instanceKey, `flush error logs`)
 	_, _ = ExecInstance(instanceKey, `flush error logs`)
 
@@ -137,32 +137,32 @@ func RefreshInstanceSlaveHosts(instanceKey *InstanceKey) (*Instance, error) {
 	return instance, err
 }
 
-// GetSlaveRestartPreserveStatements returns a sequence of statements that make sure a replica is stopped
+// GetSubordinateRestartPreserveStatements returns a sequence of statements that make sure a replica is stopped
 // and then returned to the same state. For example, if the replica was fully running, this will issue
 // a STOP on both io_thread and sql_thread, followed by START on both. If one of them is not running
 // at the time this function is called, said thread will be neither stopped nor started.
 // The caller may provide an injected statememt, to be executed while the replica is stopped.
 // This is useful for CHANGE MASTER TO commands, that unfortunately must take place while the replica
 // is completely stopped.
-func GetSlaveRestartPreserveStatements(instanceKey *InstanceKey, injectedStatement string) (statements []string, err error) {
+func GetSubordinateRestartPreserveStatements(instanceKey *InstanceKey, injectedStatement string) (statements []string, err error) {
 	instance, err := ReadTopologyInstance(instanceKey)
 	if err != nil {
 		return statements, err
 	}
-	if instance.Slave_IO_Running {
-		statements = append(statements, SemicolonTerminated(`stop slave io_thread`))
+	if instance.Subordinate_IO_Running {
+		statements = append(statements, SemicolonTerminated(`stop subordinate io_thread`))
 	}
-	if instance.Slave_SQL_Running {
-		statements = append(statements, SemicolonTerminated(`stop slave sql_thread`))
+	if instance.Subordinate_SQL_Running {
+		statements = append(statements, SemicolonTerminated(`stop subordinate sql_thread`))
 	}
 	if injectedStatement != "" {
 		statements = append(statements, SemicolonTerminated(injectedStatement))
 	}
-	if instance.Slave_SQL_Running {
-		statements = append(statements, SemicolonTerminated(`start slave sql_thread`))
+	if instance.Subordinate_SQL_Running {
+		statements = append(statements, SemicolonTerminated(`start subordinate sql_thread`))
 	}
-	if instance.Slave_IO_Running {
-		statements = append(statements, SemicolonTerminated(`start slave io_thread`))
+	if instance.Subordinate_IO_Running {
+		statements = append(statements, SemicolonTerminated(`start subordinate io_thread`))
 	}
 	return statements, err
 }
@@ -226,12 +226,12 @@ func PurgeBinaryLogsToCurrent(instanceKey *InstanceKey) (*Instance, error) {
 	return PurgeBinaryLogsTo(instanceKey, instance.SelfBinlogCoordinates.LogFile)
 }
 
-func SetSemiSyncMaster(instanceKey *InstanceKey, enableMaster bool) (*Instance, error) {
+func SetSemiSyncMain(instanceKey *InstanceKey, enableMain bool) (*Instance, error) {
 	instance, err := ReadTopologyInstance(instanceKey)
 	if err != nil {
 		return instance, err
 	}
-	if _, err := ExecInstance(instanceKey, "set @@global.rpl_semi_sync_master_enabled=?", enableMaster); err != nil {
+	if _, err := ExecInstance(instanceKey, "set @@global.rpl_semi_sync_main_enabled=?", enableMain); err != nil {
 		return instance, log.Errore(err)
 	}
 	return ReadTopologyInstance(instanceKey)
@@ -245,13 +245,13 @@ func SetSemiSyncReplica(instanceKey *InstanceKey, enableReplica bool) (*Instance
 	if instance.SemiSyncReplicaEnabled == enableReplica {
 		return instance, nil
 	}
-	if _, err := ExecInstance(instanceKey, "set @@global.rpl_semi_sync_slave_enabled=?", enableReplica); err != nil {
+	if _, err := ExecInstance(instanceKey, "set @@global.rpl_semi_sync_subordinate_enabled=?", enableReplica); err != nil {
 		return instance, log.Errore(err)
 	}
-	if instance.Slave_IO_Running {
+	if instance.Subordinate_IO_Running {
 		// Need to apply change by stopping starting IO thread
-		ExecInstance(instanceKey, "stop slave io_thread")
-		if _, err := ExecInstance(instanceKey, "start slave io_thread"); err != nil {
+		ExecInstance(instanceKey, "stop subordinate io_thread")
+		if _, err := ExecInstance(instanceKey, "start subordinate io_thread"); err != nil {
 			return instance, log.Errore(err)
 		}
 	}
@@ -259,10 +259,10 @@ func SetSemiSyncReplica(instanceKey *InstanceKey, enableReplica bool) (*Instance
 
 }
 
-// StopSlaveNicely stops a replica such that SQL_thread and IO_thread are aligned (i.e.
+// StopSubordinateNicely stops a replica such that SQL_thread and IO_thread are aligned (i.e.
 // SQL_thread consumes all relay log entries)
 // It will actually START the sql_thread even if the replica is completely stopped.
-func StopSlaveNicely(instanceKey *InstanceKey, timeout time.Duration) (*Instance, error) {
+func StopSubordinateNicely(instanceKey *InstanceKey, timeout time.Duration) (*Instance, error) {
 	instance, err := ReadTopologyInstance(instanceKey)
 	if err != nil {
 		return instance, log.Errore(err)
@@ -273,9 +273,9 @@ func StopSlaveNicely(instanceKey *InstanceKey, timeout time.Duration) (*Instance
 	}
 
 	// stop io_thread, start sql_thread but catch any errors
-	for _, cmd := range []string{`stop slave io_thread`, `start slave sql_thread`} {
+	for _, cmd := range []string{`stop subordinate io_thread`, `start subordinate sql_thread`} {
 		if _, err = ExecInstance(instanceKey, cmd); err != nil {
-			return nil, log.Errorf("%+v: StopSlaveNicely: %q failed: %+v", *instanceKey, cmd, err)
+			return nil, log.Errorf("%+v: StopSubordinateNicely: %q failed: %+v", *instanceKey, cmd, err)
 		}
 	}
 
@@ -286,7 +286,7 @@ func StopSlaveNicely(instanceKey *InstanceKey, timeout time.Duration) (*Instance
 			timeSinceStartTime := time.Since(startTime)
 			if timeout > 0 && timeSinceStartTime >= timeout {
 				// timeout
-				return nil, log.Errorf("%+v: StopSlaveNicely timeout after %+v", *instanceKey, timeSinceStartTime)
+				return nil, log.Errorf("%+v: StopSubordinateNicely timeout after %+v", *instanceKey, timeSinceStartTime)
 			}
 			instance, err = ReadTopologyInstance(instanceKey)
 			if err != nil {
@@ -300,10 +300,10 @@ func StopSlaveNicely(instanceKey *InstanceKey, timeout time.Duration) (*Instance
 			}
 		}
 	}
-	_, err = ExecInstance(instanceKey, `stop slave`)
+	_, err = ExecInstance(instanceKey, `stop subordinate`)
 	if err != nil {
 		// Patch; current MaxScale behavior for STOP SLAVE is to throw an error if replica already stopped.
-		if instance.isMaxScale() && err.Error() == "Error 1199: Slave connection is not running" {
+		if instance.isMaxScale() && err.Error() == "Error 1199: Subordinate connection is not running" {
 			err = nil
 		}
 	}
@@ -312,13 +312,13 @@ func StopSlaveNicely(instanceKey *InstanceKey, timeout time.Duration) (*Instance
 	}
 
 	instance, err = ReadTopologyInstance(instanceKey)
-	log.Infof("Stopped slave nicely on %+v, Self:%+v, Exec:%+v", *instanceKey, instance.SelfBinlogCoordinates, instance.ExecBinlogCoordinates)
+	log.Infof("Stopped subordinate nicely on %+v, Self:%+v, Exec:%+v", *instanceKey, instance.SelfBinlogCoordinates, instance.ExecBinlogCoordinates)
 	return instance, err
 }
 
-// StopSlaves will stop replication concurrently on given set of replicas.
+// StopSubordinates will stop replication concurrently on given set of replicas.
 // It will potentially do nothing, or attempt to stop _nicely_ or just stop normally, all according to stopReplicationMethod
-func StopSlaves(replicas [](*Instance), stopReplicationMethod StopReplicationMethod, timeout time.Duration) [](*Instance) {
+func StopSubordinates(replicas [](*Instance), stopReplicationMethod StopReplicationMethod, timeout time.Duration) [](*Instance) {
 	if stopReplicationMethod == NoStopReplication {
 		return replicas
 	}
@@ -336,9 +336,9 @@ func StopSlaves(replicas [](*Instance), stopReplicationMethod StopReplicationMet
 			// Wait your turn to read a replica
 			ExecuteOnTopology(func() {
 				if stopReplicationMethod == StopReplicationNicely {
-					StopSlaveNicely(&replica.Key, timeout)
+					StopSubordinateNicely(&replica.Key, timeout)
 				}
-				replica, _ = StopSlave(&replica.Key)
+				replica, _ = StopSubordinate(&replica.Key)
 				updatedReplica = &replica
 			})
 		}()
@@ -349,13 +349,13 @@ func StopSlaves(replicas [](*Instance), stopReplicationMethod StopReplicationMet
 	return refreshedReplicas
 }
 
-// StopSlavesNicely will attemt to stop all given replicas nicely, up to timeout
-func StopSlavesNicely(replicas [](*Instance), timeout time.Duration) [](*Instance) {
-	return StopSlaves(replicas, StopReplicationNicely, timeout)
+// StopSubordinatesNicely will attemt to stop all given replicas nicely, up to timeout
+func StopSubordinatesNicely(replicas [](*Instance), timeout time.Duration) [](*Instance) {
+	return StopSubordinates(replicas, StopReplicationNicely, timeout)
 }
 
-// StopSlave stops replication on a given instance
-func StopSlave(instanceKey *InstanceKey) (*Instance, error) {
+// StopSubordinate stops replication on a given instance
+func StopSubordinate(instanceKey *InstanceKey) (*Instance, error) {
 	instance, err := ReadTopologyInstance(instanceKey)
 	if err != nil {
 		return instance, log.Errore(err)
@@ -364,10 +364,10 @@ func StopSlave(instanceKey *InstanceKey) (*Instance, error) {
 	if !instance.IsReplica() {
 		return instance, fmt.Errorf("instance is not a replica: %+v", instanceKey)
 	}
-	_, err = ExecInstance(instanceKey, `stop slave`)
+	_, err = ExecInstance(instanceKey, `stop subordinate`)
 	if err != nil {
 		// Patch; current MaxScale behavior for STOP SLAVE is to throw an error if replica already stopped.
-		if instance.isMaxScale() && err.Error() == "Error 1199: Slave connection is not running" {
+		if instance.isMaxScale() && err.Error() == "Error 1199: Subordinate connection is not running" {
 			err = nil
 		}
 	}
@@ -377,14 +377,14 @@ func StopSlave(instanceKey *InstanceKey) (*Instance, error) {
 	}
 	instance, err = ReadTopologyInstance(instanceKey)
 
-	log.Infof("Stopped slave on %+v, Self:%+v, Exec:%+v", *instanceKey, instance.SelfBinlogCoordinates, instance.ExecBinlogCoordinates)
+	log.Infof("Stopped subordinate on %+v, Self:%+v, Exec:%+v", *instanceKey, instance.SelfBinlogCoordinates, instance.ExecBinlogCoordinates)
 	return instance, err
 }
 
 // sleep immediately after START SLAVE for a capped duration, until both replication threads are running.
 // This is to give slack to IO thread to connect and begin streaming, and to SQL thread to start applying.
 // Sleep is incremental with ongoing attempt to see whether replication is already up
-func startSlavePostSleep(instanceKey *InstanceKey) error {
+func startSubordinatePostSleep(instanceKey *InstanceKey) error {
 	waitDuration := time.Second
 	waitInterval := 10 * time.Millisecond
 	startTime := time.Now()
@@ -405,8 +405,8 @@ func startSlavePostSleep(instanceKey *InstanceKey) error {
 	return nil
 }
 
-// StartSlave starts replication on a given instance.
-func StartSlave(instanceKey *InstanceKey) (*Instance, error) {
+// StartSubordinate starts replication on a given instance.
+func StartSubordinate(instanceKey *InstanceKey) (*Instance, error) {
 	instance, err := ReadTopologyInstance(instanceKey)
 	if err != nil {
 		return instance, log.Errore(err)
@@ -419,36 +419,36 @@ func StartSlave(instanceKey *InstanceKey) (*Instance, error) {
 	// If async fallback is disallowed, we'd better make sure to enable replicas to
 	// send ACKs before START SLAVE. Replica ACKing is off at mysqld startup because
 	// some replicas (those that must never be promoted) should never ACK.
-	// Note: We assume that replicas use 'skip-slave-start' so they won't
+	// Note: We assume that replicas use 'skip-subordinate-start' so they won't
 	//       START SLAVE on their own upon restart.
 	if instance.SemiSyncEnforced {
 		// Send ACK only from promotable instances.
 		sendACK := instance.PromotionRule != MustNotPromoteRule
-		// Always disable master setting, in case we're converting a former master.
+		// Always disable main setting, in case we're converting a former main.
 		if err := EnableSemiSync(instanceKey, false, sendACK); err != nil {
 			return instance, log.Errore(err)
 		}
 	}
 
-	_, err = ExecInstance(instanceKey, `start slave`)
+	_, err = ExecInstance(instanceKey, `start subordinate`)
 	if err != nil {
 		return instance, log.Errore(err)
 	}
-	log.Infof("Started slave on %+v", instanceKey)
+	log.Infof("Started subordinate on %+v", instanceKey)
 
-	startSlavePostSleep(instanceKey)
+	startSubordinatePostSleep(instanceKey)
 
 	instance, err = ReadTopologyInstance(instanceKey)
 	return instance, err
 }
 
-// RestartSlave stops & starts replication on a given instance
-func RestartSlave(instanceKey *InstanceKey) (instance *Instance, err error) {
-	instance, err = StopSlave(instanceKey)
+// RestartSubordinate stops & starts replication on a given instance
+func RestartSubordinate(instanceKey *InstanceKey) (instance *Instance, err error) {
+	instance, err = StopSubordinate(instanceKey)
 	if err != nil {
 		return instance, log.Errore(err)
 	}
-	instance, err = StartSlave(instanceKey)
+	instance, err = StartSubordinate(instanceKey)
 	if err != nil {
 		return instance, log.Errore(err)
 	}
@@ -456,8 +456,8 @@ func RestartSlave(instanceKey *InstanceKey) (instance *Instance, err error) {
 
 }
 
-// StartSlaves will do concurrent start-slave
-func StartSlaves(replicas [](*Instance)) {
+// StartSubordinates will do concurrent start-subordinate
+func StartSubordinates(replicas [](*Instance)) {
 	// use concurrency but wait for all to complete
 	log.Debugf("Starting %d replicas", len(replicas))
 	barrier := make(chan InstanceKey)
@@ -467,7 +467,7 @@ func StartSlaves(replicas [](*Instance)) {
 			// Signal compelted replica
 			defer func() { barrier <- instance.Key }()
 			// Wait your turn to read a replica
-			ExecuteOnTopology(func() { StartSlave(&instance.Key) })
+			ExecuteOnTopology(func() { StartSubordinate(&instance.Key) })
 		}()
 	}
 	for range replicas {
@@ -475,8 +475,8 @@ func StartSlaves(replicas [](*Instance)) {
 	}
 }
 
-// StartSlaveUntilMasterCoordinates issuesa START SLAVE UNTIL... statement on given instance
-func StartSlaveUntilMasterCoordinates(instanceKey *InstanceKey, masterCoordinates *BinlogCoordinates) (*Instance, error) {
+// StartSubordinateUntilMainCoordinates issuesa START SLAVE UNTIL... statement on given instance
+func StartSubordinateUntilMainCoordinates(instanceKey *InstanceKey, mainCoordinates *BinlogCoordinates) (*Instance, error) {
 	instance, err := ReadTopologyInstance(instanceKey)
 	if err != nil {
 		return instance, log.Errore(err)
@@ -486,15 +486,15 @@ func StartSlaveUntilMasterCoordinates(instanceKey *InstanceKey, masterCoordinate
 		return instance, fmt.Errorf("instance is not a replica: %+v", instanceKey)
 	}
 	if instance.ReplicaRunning() {
-		return instance, fmt.Errorf("slave already running: %+v", instanceKey)
+		return instance, fmt.Errorf("subordinate already running: %+v", instanceKey)
 	}
 
-	log.Infof("Will start slave on %+v until coordinates: %+v", instanceKey, masterCoordinates)
+	log.Infof("Will start subordinate on %+v until coordinates: %+v", instanceKey, mainCoordinates)
 
 	if instance.SemiSyncEnforced {
 		// Send ACK only from promotable instances.
 		sendACK := instance.PromotionRule != MustNotPromoteRule
-		// Always disable master setting, in case we're converting a former master.
+		// Always disable main setting, in case we're converting a former main.
 		if err := EnableSemiSync(instanceKey, false, sendACK); err != nil {
 			return instance, log.Errore(err)
 		}
@@ -503,8 +503,8 @@ func StartSlaveUntilMasterCoordinates(instanceKey *InstanceKey, masterCoordinate
 	// MariaDB has a bug: a CHANGE MASTER TO statement does not work properly with prepared statement... :P
 	// See https://mariadb.atlassian.net/browse/MDEV-7640
 	// This is the reason for ExecInstance
-	_, err = ExecInstance(instanceKey, "start slave until master_log_file=?, master_log_pos=?",
-		masterCoordinates.LogFile, masterCoordinates.LogPos)
+	_, err = ExecInstance(instanceKey, "start subordinate until main_log_file=?, main_log_pos=?",
+		mainCoordinates.LogFile, mainCoordinates.LogPos)
 	if err != nil {
 		return instance, log.Errore(err)
 	}
@@ -516,16 +516,16 @@ func StartSlaveUntilMasterCoordinates(instanceKey *InstanceKey, masterCoordinate
 		}
 
 		switch {
-		case instance.ExecBinlogCoordinates.SmallerThan(masterCoordinates):
+		case instance.ExecBinlogCoordinates.SmallerThan(mainCoordinates):
 			time.Sleep(sqlThreadPollDuration)
-		case instance.ExecBinlogCoordinates.Equals(masterCoordinates):
+		case instance.ExecBinlogCoordinates.Equals(mainCoordinates):
 			upToDate = true
-		case masterCoordinates.SmallerThan(&instance.ExecBinlogCoordinates):
+		case mainCoordinates.SmallerThan(&instance.ExecBinlogCoordinates):
 			return instance, fmt.Errorf("Start SLAVE UNTIL is past coordinates: %+v", instanceKey)
 		}
 	}
 
-	instance, err = StopSlave(instanceKey)
+	instance, err = StopSubordinate(instanceKey)
 	if err != nil {
 		return instance, log.Errore(err)
 	}
@@ -533,154 +533,154 @@ func StartSlaveUntilMasterCoordinates(instanceKey *InstanceKey, masterCoordinate
 	return instance, err
 }
 
-// EnableSemiSync sets the rpl_semi_sync_(master|slave)_enabled variables
+// EnableSemiSync sets the rpl_semi_sync_(main|subordinate)_enabled variables
 // on a given instance.
-func EnableSemiSync(instanceKey *InstanceKey, master, slave bool) error {
-	log.Infof("instance %+v rpl_semi_sync_master_enabled: %t, rpl_semi_sync_slave_enabled: %t", instanceKey, master, slave)
+func EnableSemiSync(instanceKey *InstanceKey, main, subordinate bool) error {
+	log.Infof("instance %+v rpl_semi_sync_main_enabled: %t, rpl_semi_sync_subordinate_enabled: %t", instanceKey, main, subordinate)
 	_, err := ExecInstance(instanceKey,
-		`set global rpl_semi_sync_master_enabled = ?, global rpl_semi_sync_slave_enabled = ?`,
-		master, slave)
+		`set global rpl_semi_sync_main_enabled = ?, global rpl_semi_sync_subordinate_enabled = ?`,
+		main, subordinate)
 	return err
 }
 
-// ChangeMasterCredentials issues a CHANGE MASTER TO... MASTER_USER=, MASTER_PASSWORD=...
-func ChangeMasterCredentials(instanceKey *InstanceKey, masterUser string, masterPassword string) (*Instance, error) {
+// ChangeMainCredentials issues a CHANGE MASTER TO... MASTER_USER=, MASTER_PASSWORD=...
+func ChangeMainCredentials(instanceKey *InstanceKey, mainUser string, mainPassword string) (*Instance, error) {
 	instance, err := ReadTopologyInstance(instanceKey)
 	if err != nil {
 		return instance, log.Errore(err)
 	}
-	if masterUser == "" {
-		return instance, log.Errorf("Empty user in ChangeMasterCredentials() for %+v", *instanceKey)
+	if mainUser == "" {
+		return instance, log.Errorf("Empty user in ChangeMainCredentials() for %+v", *instanceKey)
 	}
 
 	if instance.ReplicaRunning() {
-		return instance, fmt.Errorf("ChangeMasterTo: Cannot change master on: %+v because slave is running", *instanceKey)
+		return instance, fmt.Errorf("ChangeMainTo: Cannot change main on: %+v because subordinate is running", *instanceKey)
 	}
-	log.Debugf("ChangeMasterTo: will attempt changing master credentials on %+v", *instanceKey)
+	log.Debugf("ChangeMainTo: will attempt changing main credentials on %+v", *instanceKey)
 
 	if *config.RuntimeCLIFlags.Noop {
 		return instance, fmt.Errorf("noop: aborting CHANGE MASTER TO operation on %+v; signalling error but nothing went wrong.", *instanceKey)
 	}
-	_, err = ExecInstance(instanceKey, "change master to master_user=?, master_password=?",
-		masterUser, masterPassword)
+	_, err = ExecInstance(instanceKey, "change main to main_user=?, main_password=?",
+		mainUser, mainPassword)
 
 	if err != nil {
 		return instance, log.Errore(err)
 	}
 
-	log.Infof("ChangeMasterTo: Changed master credentials on %+v", *instanceKey)
+	log.Infof("ChangeMainTo: Changed main credentials on %+v", *instanceKey)
 
 	instance, err = ReadTopologyInstance(instanceKey)
 	return instance, err
 }
 
-// EnableMasterSSL issues CHANGE MASTER TO MASTER_SSL=1
-func EnableMasterSSL(instanceKey *InstanceKey) (*Instance, error) {
+// EnableMainSSL issues CHANGE MASTER TO MASTER_SSL=1
+func EnableMainSSL(instanceKey *InstanceKey) (*Instance, error) {
 	instance, err := ReadTopologyInstance(instanceKey)
 	if err != nil {
 		return instance, log.Errore(err)
 	}
 
 	if instance.ReplicaRunning() {
-		return instance, fmt.Errorf("EnableMasterSSL: Cannot enable SSL replication on %+v because slave is running", *instanceKey)
+		return instance, fmt.Errorf("EnableMainSSL: Cannot enable SSL replication on %+v because subordinate is running", *instanceKey)
 	}
-	log.Debugf("EnableMasterSSL: Will attempt enabling SSL replication on %+v", *instanceKey)
+	log.Debugf("EnableMainSSL: Will attempt enabling SSL replication on %+v", *instanceKey)
 
 	if *config.RuntimeCLIFlags.Noop {
 		return instance, fmt.Errorf("noop: aborting CHANGE MASTER TO MASTER_SSL=1 operation on %+v; signaling error but nothing went wrong.", *instanceKey)
 	}
-	_, err = ExecInstance(instanceKey, "change master to master_ssl=1")
+	_, err = ExecInstance(instanceKey, "change main to main_ssl=1")
 
 	if err != nil {
 		return instance, log.Errore(err)
 	}
 
-	log.Infof("EnableMasterSSL: Enabled SSL replication on %+v", *instanceKey)
+	log.Infof("EnableMainSSL: Enabled SSL replication on %+v", *instanceKey)
 
 	instance, err = ReadTopologyInstance(instanceKey)
 	return instance, err
 }
 
-// ChangeMasterTo changes the given instance's master according to given input.
-func ChangeMasterTo(instanceKey *InstanceKey, masterKey *InstanceKey, masterBinlogCoordinates *BinlogCoordinates, skipUnresolve bool, gtidHint OperationGTIDHint) (*Instance, error) {
+// ChangeMainTo changes the given instance's main according to given input.
+func ChangeMainTo(instanceKey *InstanceKey, mainKey *InstanceKey, mainBinlogCoordinates *BinlogCoordinates, skipUnresolve bool, gtidHint OperationGTIDHint) (*Instance, error) {
 	instance, err := ReadTopologyInstance(instanceKey)
 	if err != nil {
 		return instance, log.Errore(err)
 	}
 
 	if instance.ReplicaRunning() {
-		return instance, fmt.Errorf("ChangeMasterTo: Cannot change master on: %+v because slave is running", *instanceKey)
+		return instance, fmt.Errorf("ChangeMainTo: Cannot change main on: %+v because subordinate is running", *instanceKey)
 	}
-	log.Debugf("ChangeMasterTo: will attempt changing master on %+v to %+v, %+v", *instanceKey, *masterKey, *masterBinlogCoordinates)
-	changeToMasterKey := masterKey
+	log.Debugf("ChangeMainTo: will attempt changing main on %+v to %+v, %+v", *instanceKey, *mainKey, *mainBinlogCoordinates)
+	changeToMainKey := mainKey
 	if !skipUnresolve {
-		unresolvedMasterKey, nameUnresolved, err := UnresolveHostname(masterKey)
+		unresolvedMainKey, nameUnresolved, err := UnresolveHostname(mainKey)
 		if err != nil {
-			log.Debugf("ChangeMasterTo: aborting operation on %+v due to resolving error on %+v: %+v", *instanceKey, *masterKey, err)
+			log.Debugf("ChangeMainTo: aborting operation on %+v due to resolving error on %+v: %+v", *instanceKey, *mainKey, err)
 			return instance, err
 		}
 		if nameUnresolved {
-			log.Debugf("ChangeMasterTo: Unresolved %+v into %+v", *masterKey, unresolvedMasterKey)
+			log.Debugf("ChangeMainTo: Unresolved %+v into %+v", *mainKey, unresolvedMainKey)
 		}
-		changeToMasterKey = &unresolvedMasterKey
+		changeToMainKey = &unresolvedMainKey
 	}
 
 	if *config.RuntimeCLIFlags.Noop {
 		return instance, fmt.Errorf("noop: aborting CHANGE MASTER TO operation on %+v; signalling error but nothing went wrong.", *instanceKey)
 	}
 
-	originalMasterKey := instance.MasterKey
+	originalMainKey := instance.MainKey
 	originalExecBinlogCoordinates := instance.ExecBinlogCoordinates
 
 	changedViaGTID := false
 	if instance.UsingMariaDBGTID && gtidHint != GTIDHintDeny {
 		// Keep on using GTID
-		_, err = ExecInstance(instanceKey, "change master to master_host=?, master_port=?",
-			changeToMasterKey.Hostname, changeToMasterKey.Port)
+		_, err = ExecInstance(instanceKey, "change main to main_host=?, main_port=?",
+			changeToMainKey.Hostname, changeToMainKey.Port)
 		changedViaGTID = true
 	} else if instance.UsingMariaDBGTID && gtidHint == GTIDHintDeny {
 		// Make sure to not use GTID
-		_, err = ExecInstance(instanceKey, "change master to master_host=?, master_port=?, master_log_file=?, master_log_pos=?, master_use_gtid=no",
-			changeToMasterKey.Hostname, changeToMasterKey.Port, masterBinlogCoordinates.LogFile, masterBinlogCoordinates.LogPos)
+		_, err = ExecInstance(instanceKey, "change main to main_host=?, main_port=?, main_log_file=?, main_log_pos=?, main_use_gtid=no",
+			changeToMainKey.Hostname, changeToMainKey.Port, mainBinlogCoordinates.LogFile, mainBinlogCoordinates.LogPos)
 	} else if instance.IsMariaDB() && gtidHint == GTIDHintForce {
 		// Is MariaDB; not using GTID, turn into GTID
-		_, err = ExecInstance(instanceKey, "change master to master_host=?, master_port=?, master_use_gtid=slave_pos",
-			changeToMasterKey.Hostname, changeToMasterKey.Port)
+		_, err = ExecInstance(instanceKey, "change main to main_host=?, main_port=?, main_use_gtid=subordinate_pos",
+			changeToMainKey.Hostname, changeToMainKey.Port)
 		changedViaGTID = true
 	} else if instance.UsingOracleGTID && gtidHint != GTIDHintDeny {
 		// Is Oracle; already uses GTID; keep using it.
-		_, err = ExecInstance(instanceKey, "change master to master_host=?, master_port=?",
-			changeToMasterKey.Hostname, changeToMasterKey.Port)
+		_, err = ExecInstance(instanceKey, "change main to main_host=?, main_port=?",
+			changeToMainKey.Hostname, changeToMainKey.Port)
 		changedViaGTID = true
 	} else if instance.UsingOracleGTID && gtidHint == GTIDHintDeny {
 		// Is Oracle; already uses GTID
-		_, err = ExecInstance(instanceKey, "change master to master_host=?, master_port=?, master_log_file=?, master_log_pos=?, master_auto_position=0",
-			changeToMasterKey.Hostname, changeToMasterKey.Port, masterBinlogCoordinates.LogFile, masterBinlogCoordinates.LogPos)
+		_, err = ExecInstance(instanceKey, "change main to main_host=?, main_port=?, main_log_file=?, main_log_pos=?, main_auto_position=0",
+			changeToMainKey.Hostname, changeToMainKey.Port, mainBinlogCoordinates.LogFile, mainBinlogCoordinates.LogPos)
 	} else if instance.SupportsOracleGTID && gtidHint == GTIDHintForce {
 		// Is Oracle; not using GTID right now; turn into GTID
-		_, err = ExecInstance(instanceKey, "change master to master_host=?, master_port=?, master_auto_position=1",
-			changeToMasterKey.Hostname, changeToMasterKey.Port)
+		_, err = ExecInstance(instanceKey, "change main to main_host=?, main_port=?, main_auto_position=1",
+			changeToMainKey.Hostname, changeToMainKey.Port)
 		changedViaGTID = true
 	} else {
 		// Normal binlog file:pos
-		_, err = ExecInstance(instanceKey, "change master to master_host=?, master_port=?, master_log_file=?, master_log_pos=?",
-			changeToMasterKey.Hostname, changeToMasterKey.Port, masterBinlogCoordinates.LogFile, masterBinlogCoordinates.LogPos)
+		_, err = ExecInstance(instanceKey, "change main to main_host=?, main_port=?, main_log_file=?, main_log_pos=?",
+			changeToMainKey.Hostname, changeToMainKey.Port, mainBinlogCoordinates.LogFile, mainBinlogCoordinates.LogPos)
 	}
 	if err != nil {
 		return instance, log.Errore(err)
 	}
-	WriteMasterPositionEquivalence(&originalMasterKey, &originalExecBinlogCoordinates, changeToMasterKey, masterBinlogCoordinates)
+	WriteMainPositionEquivalence(&originalMainKey, &originalExecBinlogCoordinates, changeToMainKey, mainBinlogCoordinates)
 	ResetInstanceRelaylogCoordinatesHistory(instanceKey)
 
-	log.Infof("ChangeMasterTo: Changed master on %+v to: %+v, %+v. GTID: %+v", *instanceKey, masterKey, masterBinlogCoordinates, changedViaGTID)
+	log.Infof("ChangeMainTo: Changed main on %+v to: %+v, %+v. GTID: %+v", *instanceKey, mainKey, mainBinlogCoordinates, changedViaGTID)
 
 	instance, err = ReadTopologyInstance(instanceKey)
 	return instance, err
 }
 
-// SkipToNextBinaryLog changes master position to beginning of next binlog
+// SkipToNextBinaryLog changes main position to beginning of next binlog
 // USE WITH CARE!
-// Use case is binlog servers where the master was gone & replaced by another.
+// Use case is binlog servers where the main was gone & replaced by another.
 func SkipToNextBinaryLog(instanceKey *InstanceKey) (*Instance, error) {
 	instance, err := ReadTopologyInstance(instanceKey)
 	if err != nil {
@@ -694,67 +694,67 @@ func SkipToNextBinaryLog(instanceKey *InstanceKey) (*Instance, error) {
 	nextFileCoordinates.LogPos = 4
 	log.Debugf("Will skip replication on %+v to next binary log: %+v", instance.Key, nextFileCoordinates.LogFile)
 
-	instance, err = ChangeMasterTo(&instance.Key, &instance.MasterKey, &nextFileCoordinates, false, GTIDHintNeutral)
+	instance, err = ChangeMainTo(&instance.Key, &instance.MainKey, &nextFileCoordinates, false, GTIDHintNeutral)
 	if err != nil {
 		return instance, log.Errore(err)
 	}
 	AuditOperation("skip-binlog", instanceKey, fmt.Sprintf("Skipped replication to next binary log: %+v", nextFileCoordinates.LogFile))
-	return StartSlave(instanceKey)
+	return StartSubordinate(instanceKey)
 }
 
-// ResetSlave resets a replica, breaking the replication
-func ResetSlave(instanceKey *InstanceKey) (*Instance, error) {
+// ResetSubordinate resets a replica, breaking the replication
+func ResetSubordinate(instanceKey *InstanceKey) (*Instance, error) {
 	instance, err := ReadTopologyInstance(instanceKey)
 	if err != nil {
 		return instance, log.Errore(err)
 	}
 
 	if instance.ReplicaRunning() {
-		return instance, fmt.Errorf("Cannot reset slave on: %+v because slave is running", instanceKey)
+		return instance, fmt.Errorf("Cannot reset subordinate on: %+v because subordinate is running", instanceKey)
 	}
 
 	if *config.RuntimeCLIFlags.Noop {
-		return instance, fmt.Errorf("noop: aborting reset-slave operation on %+v; signalling error but nothing went wrong.", *instanceKey)
+		return instance, fmt.Errorf("noop: aborting reset-subordinate operation on %+v; signalling error but nothing went wrong.", *instanceKey)
 	}
 
 	// MySQL's RESET SLAVE is done correctly; however SHOW SLAVE STATUS still returns old hostnames etc
 	// and only resets till after next restart. This leads to orchestrator still thinking the instance replicates
 	// from old host. We therefore forcibly modify the hostname.
 	// RESET SLAVE ALL command solves this, but only as of 5.6.3
-	_, err = ExecInstance(instanceKey, `change master to master_host='_'`)
+	_, err = ExecInstance(instanceKey, `change main to main_host='_'`)
 	if err != nil {
 		return instance, log.Errore(err)
 	}
-	_, err = ExecInstance(instanceKey, `reset slave /*!50603 all */`)
+	_, err = ExecInstance(instanceKey, `reset subordinate /*!50603 all */`)
 	if err != nil {
 		return instance, log.Errore(err)
 	}
-	log.Infof("Reset slave %+v", instanceKey)
+	log.Infof("Reset subordinate %+v", instanceKey)
 
 	instance, err = ReadTopologyInstance(instanceKey)
 	return instance, err
 }
 
-// ResetMaster issues a RESET MASTER statement on given instance. Use with extreme care!
-func ResetMaster(instanceKey *InstanceKey) (*Instance, error) {
+// ResetMain issues a RESET MASTER statement on given instance. Use with extreme care!
+func ResetMain(instanceKey *InstanceKey) (*Instance, error) {
 	instance, err := ReadTopologyInstance(instanceKey)
 	if err != nil {
 		return instance, log.Errore(err)
 	}
 
 	if instance.ReplicaRunning() {
-		return instance, fmt.Errorf("Cannot reset master on: %+v because slave is running", instanceKey)
+		return instance, fmt.Errorf("Cannot reset main on: %+v because subordinate is running", instanceKey)
 	}
 
 	if *config.RuntimeCLIFlags.Noop {
-		return instance, fmt.Errorf("noop: aborting reset-master operation on %+v; signalling error but nothing went wrong.", *instanceKey)
+		return instance, fmt.Errorf("noop: aborting reset-main operation on %+v; signalling error but nothing went wrong.", *instanceKey)
 	}
 
-	_, err = ExecInstance(instanceKey, `reset master`)
+	_, err = ExecInstance(instanceKey, `reset main`)
 	if err != nil {
 		return instance, log.Errore(err)
 	}
-	log.Infof("Reset master %+v", instanceKey)
+	log.Infof("Reset main %+v", instanceKey)
 
 	instance, err = ReadTopologyInstance(instanceKey)
 	return instance, err
@@ -772,7 +772,7 @@ func setGTIDPurged(instance *Instance, gtidPurged string) error {
 
 // skipQueryClassic skips a query in normal binlog file:pos replication
 func skipQueryClassic(instance *Instance) error {
-	_, err := ExecInstance(&instance.Key, `set global sql_slave_skip_counter := 1`)
+	_, err := ExecInstance(&instance.Key, `set global sql_subordinate_skip_counter := 1`)
 	return err
 }
 
@@ -807,8 +807,8 @@ func SkipQuery(instanceKey *InstanceKey) (*Instance, error) {
 	if !instance.IsReplica() {
 		return instance, fmt.Errorf("instance is not a replica: %+v", instanceKey)
 	}
-	if instance.Slave_SQL_Running {
-		return instance, fmt.Errorf("Slave SQL thread is running on %+v", instanceKey)
+	if instance.Subordinate_SQL_Running {
+		return instance, fmt.Errorf("Subordinate SQL thread is running on %+v", instanceKey)
 	}
 	if instance.LastSQLError == "" {
 		return instance, fmt.Errorf("No SQL error on %+v", instanceKey)
@@ -830,7 +830,7 @@ func SkipQuery(instanceKey *InstanceKey) (*Instance, error) {
 		return instance, log.Errore(err)
 	}
 	AuditOperation("skip-query", instanceKey, "Skipped one query")
-	return StartSlave(instanceKey)
+	return StartSubordinate(instanceKey)
 }
 
 // DetachReplica detaches a replica from replication; forcibly corrupting the binlog coordinates (though in such way
@@ -842,27 +842,27 @@ func DetachReplica(instanceKey *InstanceKey) (*Instance, error) {
 	}
 
 	if instance.ReplicaRunning() {
-		return instance, fmt.Errorf("Cannot detach slave on: %+v because slave is running", instanceKey)
+		return instance, fmt.Errorf("Cannot detach subordinate on: %+v because subordinate is running", instanceKey)
 	}
 
 	isDetached, _ := instance.ExecBinlogCoordinates.ExtractDetachedCoordinates()
 
 	if isDetached {
-		return instance, fmt.Errorf("Cannot (need not) detach slave on: %+v because slave is already detached", instanceKey)
+		return instance, fmt.Errorf("Cannot (need not) detach subordinate on: %+v because subordinate is already detached", instanceKey)
 	}
 
 	if *config.RuntimeCLIFlags.Noop {
-		return instance, fmt.Errorf("noop: aborting detach-slave operation on %+v; signalling error but nothing went wrong.", *instanceKey)
+		return instance, fmt.Errorf("noop: aborting detach-subordinate operation on %+v; signalling error but nothing went wrong.", *instanceKey)
 	}
 
 	detachedCoordinates := instance.ExecBinlogCoordinates.Detach()
 	// Encode the current coordinates within the log file name, in such way that replication is broken, but info can still be resurrected
-	_, err = ExecInstance(instanceKey, `change master to master_log_file=?, master_log_pos=?`, detachedCoordinates.LogFile, detachedCoordinates.LogPos)
+	_, err = ExecInstance(instanceKey, `change main to main_log_file=?, main_log_pos=?`, detachedCoordinates.LogFile, detachedCoordinates.LogPos)
 	if err != nil {
 		return instance, log.Errore(err)
 	}
 
-	log.Infof("Detach slave %+v", instanceKey)
+	log.Infof("Detach subordinate %+v", instanceKey)
 
 	instance, err = ReadTopologyInstance(instanceKey)
 	return instance, err
@@ -876,38 +876,38 @@ func ReattachReplica(instanceKey *InstanceKey) (*Instance, error) {
 	}
 
 	if instance.ReplicaRunning() {
-		return instance, fmt.Errorf("Cannot (need not) reattach slave on: %+v because slave is running", instanceKey)
+		return instance, fmt.Errorf("Cannot (need not) reattach subordinate on: %+v because subordinate is running", instanceKey)
 	}
 
 	isDetached, detachedCoordinates := instance.ExecBinlogCoordinates.ExtractDetachedCoordinates()
 
 	if !isDetached {
-		return instance, fmt.Errorf("Cannot reattach slave on: %+v because slave is not detached", instanceKey)
+		return instance, fmt.Errorf("Cannot reattach subordinate on: %+v because subordinate is not detached", instanceKey)
 	}
 
 	if *config.RuntimeCLIFlags.Noop {
-		return instance, fmt.Errorf("noop: aborting reattach-slave operation on %+v; signalling error but nothing went wrong.", *instanceKey)
+		return instance, fmt.Errorf("noop: aborting reattach-subordinate operation on %+v; signalling error but nothing went wrong.", *instanceKey)
 	}
 
-	_, err = ExecInstance(instanceKey, `change master to master_log_file=?, master_log_pos=?`, detachedCoordinates.LogFile, detachedCoordinates.LogPos)
+	_, err = ExecInstance(instanceKey, `change main to main_log_file=?, main_log_pos=?`, detachedCoordinates.LogFile, detachedCoordinates.LogPos)
 	if err != nil {
 		return instance, log.Errore(err)
 	}
 
-	log.Infof("Reattach slave %+v", instanceKey)
+	log.Infof("Reattach subordinate %+v", instanceKey)
 
 	instance, err = ReadTopologyInstance(instanceKey)
 	return instance, err
 }
 
-// MasterPosWait issues a MASTER_POS_WAIT() an given instance according to given coordinates.
-func MasterPosWait(instanceKey *InstanceKey, binlogCoordinates *BinlogCoordinates) (*Instance, error) {
+// MainPosWait issues a MASTER_POS_WAIT() an given instance according to given coordinates.
+func MainPosWait(instanceKey *InstanceKey, binlogCoordinates *BinlogCoordinates) (*Instance, error) {
 	instance, err := ReadTopologyInstance(instanceKey)
 	if err != nil {
 		return instance, log.Errore(err)
 	}
 
-	_, err = ExecInstance(instanceKey, `select master_pos_wait(?, ?)`, binlogCoordinates.LogFile, binlogCoordinates.LogPos)
+	_, err = ExecInstance(instanceKey, `select main_pos_wait(?, ?)`, binlogCoordinates.LogFile, binlogCoordinates.LogPos)
 	if err != nil {
 		return instance, log.Errore(err)
 	}
@@ -917,21 +917,21 @@ func MasterPosWait(instanceKey *InstanceKey, binlogCoordinates *BinlogCoordinate
 	return instance, err
 }
 
-// Attempt to read and return replication credentials from the mysql.slave_master_info system table
+// Attempt to read and return replication credentials from the mysql.subordinate_main_info system table
 func ReadReplicationCredentials(instanceKey *InstanceKey) (replicationUser string, replicationPassword string, err error) {
 	query := `
 		select
 			ifnull(max(User_name), '') as user,
 			ifnull(max(User_password), '') as password
 		from
-			mysql.slave_master_info
+			mysql.subordinate_main_info
 	`
 	err = ScanInstanceRow(instanceKey, query, &replicationUser, &replicationPassword)
 	if err != nil {
 		return replicationUser, replicationPassword, err
 	}
 	if replicationUser == "" {
-		err = fmt.Errorf("Cannot find credentials in mysql.slave_master_info")
+		err = fmt.Errorf("Cannot find credentials in mysql.subordinate_main_info")
 	}
 	return replicationUser, replicationPassword, err
 }
@@ -947,7 +947,7 @@ func SetReadOnly(instanceKey *InstanceKey, readOnly bool) (*Instance, error) {
 		return instance, fmt.Errorf("noop: aborting set-read-only operation on %+v; signalling error but nothing went wrong.", *instanceKey)
 	}
 
-	// If async fallback is disallowed, we're responsible for flipping the master
+	// If async fallback is disallowed, we're responsible for flipping the main
 	// semi-sync switch ON before accepting writes. The setting is off by default.
 	if instance.SemiSyncEnforced && !readOnly {
 		// Send ACK only from promotable instances.
@@ -971,7 +971,7 @@ func SetReadOnly(instanceKey *InstanceKey, readOnly bool) (*Instance, error) {
 	}
 	instance, err = ReadTopologyInstance(instanceKey)
 
-	// If we just went read-only, it's safe to flip the master semi-sync switch
+	// If we just went read-only, it's safe to flip the main semi-sync switch
 	// OFF, which is the default value so that replicas can make progress.
 	if instance.SemiSyncEnforced && readOnly {
 		// Send ACK only from promotable instances.
@@ -1079,7 +1079,7 @@ func canInjectPseudoGTID(instanceKey *InstanceKey) (canInject bool, err error) {
 // CheckAndInjectPseudoGTIDOnWriter checks whether pseudo-GTID can and
 // should be injected on given instance, and if so, attempts to inject.
 func CheckAndInjectPseudoGTIDOnWriter(instance *Instance) (injected bool, err error) {
-	if !instance.IsWritableMaster() {
+	if !instance.IsWritableMain() {
 		return injected, nil
 	}
 	if !instance.IsLastCheckValid {
